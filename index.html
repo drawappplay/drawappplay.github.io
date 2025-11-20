@@ -16,10 +16,7 @@ body,html{margin:0;padding:0;width:100%;height:100%;display:flex;font-family:mon
 canvas{width:100%;height:100%;display:block;cursor:crosshair;background:#000;}
 #toolbar{display:flex;justify-content:space-around;margin-top:5px;}
 .usernameLabel{
-    position:absolute;
-    font-size:12px;
-    font-family:monospace;
-    pointer-events:none;
+    position:absolute; font-size:12px; font-family:monospace; pointer-events:none;
 }
 </style>
 </head>
@@ -50,11 +47,13 @@ const ctx = canvas.getContext('2d');
 canvas.width = canvas.offsetWidth;
 canvas.height = canvas.offsetHeight;
 
-let drawing=false,color='#0f0',brushSize=3,lastX,lastY;
-let paths=[],undone=[];
-const ws = new WebSocket('wss://clemencia-beholden-digestibly.ngrok-free.dev');
+let drawing=false, color='#0f0', brushSize=3, lastX, lastY;
+let paths=[], undone=[];
+const ws = new WebSocket('ws://localhost:3000');
 let currentRoom=null;
 let users = {};
+let batch = [];
+const batchInterval = 50;
 
 function resizeCanvas(){canvas.width=canvas.offsetWidth;canvas.height=canvas.offsetHeight;}
 window.addEventListener('resize', resizeCanvas);
@@ -62,76 +61,68 @@ window.addEventListener('resize', resizeCanvas);
 function drawLine(x0,y0,x1,y1,color,size,save=false){
     ctx.strokeStyle=color; ctx.lineWidth=size; ctx.lineCap='round';
     ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
-    if(save) paths.push({x0,y0,x1,y1,color,size});
+    if(save) batch.push({x0,y0,x1,y1,color,size});
 }
+
 canvas.addEventListener('mousedown', e=>{drawing=true; lastX=e.offsetX; lastY=e.offsetY;});
 canvas.addEventListener('mousemove', e=>{
     if(!drawing) return;
     drawLine(lastX,lastY,e.offsetX,e.offsetY,color,brushSize,true);
-    ws.send(JSON.stringify({type:'draw', x0:lastX, y0:lastY, x1:e.offsetX, y1:e.offsetY, color, size:brushSize}));
-    lastX = e.offsetX; lastY = e.offsetY;
-    ws.send(JSON.stringify({type:'cursor', x:e.offsetX, y:e.offsetY}));
+    lastX=e.offsetX; lastY=e.offsetY;
 });
 canvas.addEventListener('mouseup', ()=>drawing=false);
 canvas.addEventListener('mouseout', ()=>drawing=false);
 
-
-
-
-
-
 document.getElementById('undoBtn').addEventListener('click', ()=>{if(paths.length>0){undone.push(paths.pop()); redrawCanvas();}});
 document.getElementById('redoBtn').addEventListener('click', ()=>{if(undone.length>0){paths.push(undone.pop()); redrawCanvas();}});
-function redrawCanvas(){ctx.clearRect(0,0,canvas.width,canvas.height); paths.forEach(p=>drawLine(p.x0,p.y0,p.x1,p.y1,p.color,p.size));}
-
+function redrawCanvas(){ctx.clearRect(0,0,canvas.width,canvas.height); paths.forEach(p=>drawLine(p.x0,p.y0,p.x1,p.y1,p.color,p.size,false));}
 
 document.getElementById('colorPicker').addEventListener('change', e=>color=e.target.value);
 document.getElementById('brushSize').addEventListener('change', e=>brushSize=e.target.value);
 document.getElementById('clearCanvas').addEventListener('click', ()=>{ctx.clearRect(0,0,canvas.width,canvas.height); paths=[]; undone=[];});
 
-
 function createLabel(username,color){
-    const div = document.createElement('div');
-    div.className = 'usernameLabel';
-    div.style.color = color;
-    div.textContent = username;
+    const div=document.createElement('div');
+    div.className='usernameLabel';
+    div.style.color=color;
+    div.textContent=username;
     document.getElementById('canvasContainer').appendChild(div);
     return div;
 }
 
-
-
-
 document.getElementById('createRoom').addEventListener('click', ()=>{
-    const name = document.getElementById('roomName').value.trim();
-    if(name) ws.send(JSON.stringify({type:'createRoom', name}));
+    const name=document.getElementById('roomName').value.trim();
+    if(name) ws.send(JSON.stringify({type:'createRoom',name}));
 });
 
-
+setInterval(()=>{
+    if(batch.length>0 && currentRoom){
+        ws.send(JSON.stringify({type:'drawBatch', drawings: batch}));
+        batch = [];
+    }
+}, batchInterval);
 
 ws.addEventListener('message', e=>{
     const data = JSON.parse(e.data);
     switch(data.type){
         case'draw':
-            drawLine(data.x0,data.y0,data.x1,data.y1,data.color,data.size);
+            drawLine(data.x0,data.y0,data.x1,data.y1,data.color,data.size,false);
             break;
         case'joinedRoom':
             currentRoom = data.roomId; paths=[]; undone=[];
             data.drawings.forEach(d=>drawLine(d.x0,d.y0,d.x1,d.y1,d.color,d.size,false));
             if(data.users) data.users.forEach(u=>{
-                if(!users[u.username]) users[u.username]={x:0,y:0,targetX:0,targetY:0,color:u.color,labelDiv:createLabel(u.username,u.color)};
+                if(!users[u.username]) users[u.username]={x:0,y:0,color:u.color,labelDiv:createLabel(u.username,u.color)};
             });
             break;
         case'cursor':
-            if(!users[data.username]){
-                users[data.username]={x:data.x,y:data.y,targetX:data.x,targetY:data.y,color:data.color,labelDiv:createLabel(data.username,data.color)};
-            } else {
-                users[data.username].targetX = data.x;
-                users[data.username].targetY = data.y;
-            }
+            if(!users[data.username]) users[data.username]={x:0,y:0,color:'#0f0',labelDiv:createLabel(data.username,'#0f0')};
+            users[data.username].x=data.x; users[data.username].y=data.y;
+            users[data.username].labelDiv.style.left=(data.x+10)+'px';
+            users[data.username].labelDiv.style.top=(data.y+10)+'px';
             break;
         case'roomsList':
-            const list = document.getElementById('roomsList'); list.innerHTML='';
+            const list=document.getElementById('roomsList'); list.innerHTML='';
             data.rooms.forEach(r=>{
                 const div=document.createElement('div');
                 div.textContent=`${r.name} (${r.users})`;
@@ -144,17 +135,9 @@ ws.addEventListener('message', e=>{
 });
 
 
-function animateCursors(){
-    requestAnimationFrame(animateCursors);
-    for(const username in users){
-        const u = users[username];
-        u.x += (u.targetX - u.x) * 0.2; 
-        u.y += (u.targetY - u.y) * 0.2;
-        u.labelDiv.style.left = (u.x + 10) + 'px';
-        u.labelDiv.style.top = (u.y + 10) + 'px';
-    }
-}
-animateCursors();
+canvas.addEventListener('mousemove', e=>{
+    if(currentRoom) ws.send(JSON.stringify({type:'cursor', x:e.offsetX, y:e.offsetY}));
+});
 
 
 setInterval(()=>ws.send(JSON.stringify({type:'getRooms'})),3000);

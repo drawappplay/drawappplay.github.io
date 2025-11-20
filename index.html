@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Draw</title>
+<style>
+body,html{margin:0;padding:0;width:100%;height:100%;display:flex;font-family:monospace;background:#0f0f0f;color:#0f0;}
+#sidebar{width:300px;background:#111;border-right:2px solid #0f0;padding:15px;display:flex;flex-direction:column;}
+#sidebar h2{color:#0f0;text-align:center;margin-bottom:15px;}
+#sidebar input,#sidebar button,#sidebar select{margin:5px 0;padding:8px;border:none;border-radius:4px;background:#222;color:#0f0;}
+#sidebar button:hover{background:#0a0;}
+.room{background:#222;margin:3px 0;padding:5px;border-left:3px solid #0f0;cursor:pointer;}
+.room:hover{background:#333;}
+#canvasContainer{flex:1;position:relative;}
+canvas{width:100%;height:100%;display:block;cursor:crosshair;background:#000;}
+#toolbar{display:flex;justify-content:space-around;margin-top:5px;}
+.usernameLabel{
+    position:absolute;
+    font-size:12px;
+    font-family:monospace;
+    pointer-events:none;
+}
+</style>
+</head>
+<body>
+<div id="sidebar">
+<h2>Draw</h2>
+<input type="text" id="roomName" placeholder="Room Name">
+<button id="createRoom">Create Room</button>
+<h3>Rooms</h3>
+<div id="roomsList"></div>
+<h3>Brush</h3>
+<input type="color" id="colorPicker" value="#0f0">
+<input type="range" id="brushSize" min="1" max="50" value="3">
+<div id="toolbar">
+<button id="undoBtn">Undo</button>
+<button id="redoBtn">Redo</button>
+<button id="clearCanvas">Clear</button>
+</div>
+</div>
+
+<div id="canvasContainer">
+<canvas id="drawCanvas"></canvas>
+</div>
+
+<script>
+const canvas = document.getElementById('drawCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = canvas.offsetWidth;
+canvas.height = canvas.offsetHeight;
+
+let drawing=false,color='#0f0',brushSize=3,lastX,lastY;
+let paths=[],undone=[];
+const ws = new WebSocket('wss://clemencia-beholden-digestibly.ngrok-free.dev');
+let currentRoom=null;
+let users = {};
+
+function resizeCanvas(){canvas.width=canvas.offsetWidth;canvas.height=canvas.offsetHeight;}
+window.addEventListener('resize', resizeCanvas);
+
+function drawLine(x0,y0,x1,y1,color,size,save=false){
+    ctx.strokeStyle=color; ctx.lineWidth=size; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+    if(save) paths.push({x0,y0,x1,y1,color,size});
+}
+canvas.addEventListener('mousedown', e=>{drawing=true; lastX=e.offsetX; lastY=e.offsetY;});
+canvas.addEventListener('mousemove', e=>{
+    if(!drawing) return;
+    drawLine(lastX,lastY,e.offsetX,e.offsetY,color,brushSize,true);
+    ws.send(JSON.stringify({type:'draw', x0:lastX, y0:lastY, x1:e.offsetX, y1:e.offsetY, color, size:brushSize}));
+    lastX = e.offsetX; lastY = e.offsetY;
+    ws.send(JSON.stringify({type:'cursor', x:e.offsetX, y:e.offsetY}));
+});
+canvas.addEventListener('mouseup', ()=>drawing=false);
+canvas.addEventListener('mouseout', ()=>drawing=false);
+
+
+
+
+
+
+document.getElementById('undoBtn').addEventListener('click', ()=>{if(paths.length>0){undone.push(paths.pop()); redrawCanvas();}});
+document.getElementById('redoBtn').addEventListener('click', ()=>{if(undone.length>0){paths.push(undone.pop()); redrawCanvas();}});
+function redrawCanvas(){ctx.clearRect(0,0,canvas.width,canvas.height); paths.forEach(p=>drawLine(p.x0,p.y0,p.x1,p.y1,p.color,p.size));}
+
+
+document.getElementById('colorPicker').addEventListener('change', e=>color=e.target.value);
+document.getElementById('brushSize').addEventListener('change', e=>brushSize=e.target.value);
+document.getElementById('clearCanvas').addEventListener('click', ()=>{ctx.clearRect(0,0,canvas.width,canvas.height); paths=[]; undone=[];});
+
+
+function createLabel(username,color){
+    const div = document.createElement('div');
+    div.className = 'usernameLabel';
+    div.style.color = color;
+    div.textContent = username;
+    document.getElementById('canvasContainer').appendChild(div);
+    return div;
+}
+
+
+
+
+document.getElementById('createRoom').addEventListener('click', ()=>{
+    const name = document.getElementById('roomName').value.trim();
+    if(name) ws.send(JSON.stringify({type:'createRoom', name}));
+});
+
+
+
+ws.addEventListener('message', e=>{
+    const data = JSON.parse(e.data);
+    switch(data.type){
+        case'draw':
+            drawLine(data.x0,data.y0,data.x1,data.y1,data.color,data.size);
+            break;
+        case'joinedRoom':
+            currentRoom = data.roomId; paths=[]; undone=[];
+            data.drawings.forEach(d=>drawLine(d.x0,d.y0,d.x1,d.y1,d.color,d.size,false));
+            if(data.users) data.users.forEach(u=>{
+                if(!users[u.username]) users[u.username]={x:0,y:0,targetX:0,targetY:0,color:u.color,labelDiv:createLabel(u.username,u.color)};
+            });
+            break;
+        case'cursor':
+            if(!users[data.username]){
+                users[data.username]={x:data.x,y:data.y,targetX:data.x,targetY:data.y,color:data.color,labelDiv:createLabel(data.username,data.color)};
+            } else {
+                users[data.username].targetX = data.x;
+                users[data.username].targetY = data.y;
+            }
+            break;
+        case'roomsList':
+            const list = document.getElementById('roomsList'); list.innerHTML='';
+            data.rooms.forEach(r=>{
+                const div=document.createElement('div');
+                div.textContent=`${r.name} (${r.users})`;
+                div.className='room';
+                div.onclick=()=>{ws.send(JSON.stringify({type:'joinRoom',roomId:r.id}));};
+                list.appendChild(div);
+            });
+            break;
+    }
+});
+
+
+function animateCursors(){
+    requestAnimationFrame(animateCursors);
+    for(const username in users){
+        const u = users[username];
+        u.x += (u.targetX - u.x) * 0.2; 
+        u.y += (u.targetY - u.y) * 0.2;
+        u.labelDiv.style.left = (u.x + 10) + 'px';
+        u.labelDiv.style.top = (u.y + 10) + 'px';
+    }
+}
+animateCursors();
+
+
+setInterval(()=>ws.send(JSON.stringify({type:'getRooms'})),3000);
+</script>
+</body>
+</html>
